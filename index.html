@@ -19,7 +19,12 @@
             background-color: rgba(255, 0, 0, 0.1);
             pointer-events: none; /* 允许点击穿透到画布 */
         }
-        canvas { display: block; max-width: 100%; height: auto; }
+        canvas { 
+            display: block; 
+            max-width: 100%; 
+            height: auto; 
+            touch-action: none; /* 禁用默认的触摸行为，如平移和缩放，由我们自己处理 */
+        }
         /* 进度条样式 */
         .progress-bar-container {
             width: 100%;
@@ -127,10 +132,14 @@
 
             <div v-if="imageSrc" class="relative w-full max-w-2xl mx-auto border border-gray-300 rounded-md shadow-inner bg-gray-50 overflow-hidden">
                  <canvas ref="imageCanvasRef"
-                        @mousedown="startRoiSelection"
-                        @mousemove="updateRoiSelection"
-                        @mouseup="endRoiSelection"
-                        @mouseleave="cancelRoiSelectionIfOutOfBounds"
+                        @mousedown="startRoiSelectionMouse" 
+                        @mousemove="updateRoiSelectionMouse" 
+                        @mouseup="endRoiSelectionMouse" 
+                        @mouseleave="cancelRoiSelectionMouse"
+                        @touchstart.prevent="startRoiSelectionTouch" 
+                        @touchmove.prevent="updateRoiSelectionTouch" 
+                        @touchend="endRoiSelectionTouch"
+                        @touchcancel="cancelRoiSelectionTouch"
                         class="cursor-crosshair block">
                 </canvas>
                 <!-- 实时选择反馈DIV -->
@@ -140,7 +149,7 @@
                 </div>
             </div>
             <p v-if="imageName" class="text-sm text-gray-600 mt-2 text-center">已加载: {{ imageName }}</p>
-            <p v-if="imageSrc && !isRoiFinalized && !isSelectingRoiActive" class="text-sm text-yellow-700 mt-2 text-center bg-yellow-50 p-2 rounded-md">在图片上点击并拖动以选择分类区域。</p>
+            <p v-if="imageSrc && !isRoiFinalized && !isSelectingRoiActive" class="text-sm text-yellow-700 mt-2 text-center bg-yellow-50 p-2 rounded-md">在图片上点击/触摸并拖动以选择分类区域。</p>
              <p v-if="isRoiFinalized" class="text-sm text-green-700 mt-2 text-center bg-green-50 p-2 rounded-md">区域已选择 (蓝色框所示)。准备分类。</p>
         </section>
 
@@ -195,15 +204,13 @@
                 const imageCanvasRef = ref(null);
                 let canvasCtx = null;
                 let canvasScale = { x: 1, y: 1 };
-                // let canvasOffset = { x: 0, y: 0 }; // 目前未使用
 
                 const roiRect = ref({ x: 0, y: 0, width: 0, height: 0 });
                 const isSelectingRoiActive = ref(false);
                 const isRoiFinalized = ref(false);
-                const roiSelectionStartCanvasCoords = ref(null);
+                const roiSelectionStartCanvasCoords = ref(null); // {x, y} relative to canvas
                 const currentSelectionRectStyle = ref({ display: 'none', left: '0px', top: '0px', width: '0px', height: '0px' });
-                // 新增：存储当前在画布坐标系下的选择区域
-                const currentCanvasSelection = ref({ x: 0, y: 0, width: 0, height: 0 });
+                const currentCanvasSelection = ref({ x: 0, y: 0, width: 0, height: 0 }); // {x, y, width, height} relative to canvas
 
 
                 const inferenceOutput = ref({ result: '', confidence: '', probabilities: '' });
@@ -211,7 +218,7 @@
                 const inferenceError = ref('');
 
                 const IMG_SIZE = 256;
-                const CLASS_NAMES = {
+                const CLASS_NAMES = { // Updated class names
                     0: "7002菌株",
                     1: "7120菌株",
                     2: "无细菌"
@@ -239,6 +246,7 @@
                     }
                 }
 
+                // --- Model Loading (identical to previous version) ---
                 async function _loadModel(modelSource, sourceName) {
                     if (isModelLoading.value) return;
                     isModelLoading.value = true;
@@ -306,68 +314,33 @@
                         modelLoadingProgressText.value = '';
                     }
                 }
-
                 async function loadModelFromUrlHandler() {
-                    if (!modelUrlInput.value) {
-                        modelStatus.value = "请输入模型 URL。";
-                        return;
-                    }
-                    currentLoadSource.value = 'url';
-                    await _loadModel(modelUrlInput.value, 'URL');
+                    if (!modelUrlInput.value) { modelStatus.value = "请输入模型 URL。"; return; }
+                    currentLoadSource.value = 'url'; await _loadModel(modelUrlInput.value, 'URL');
                 }
-
                 function handleLocalModelChange(event) {
                     const file = event.target.files[0];
-                    if (file) {
-                        localModelFile.value = file;
-                        localModelFileSelected.value = true;
-                        modelStatus.value = `本地文件已选择: ${file.name}。点击 '加载本地模型'。`;
-                    } else {
-                        localModelFileSelected.value = false;
-                    }
+                    if (file) { localModelFile.value = file; localModelFileSelected.value = true; modelStatus.value = `本地文件已选择: ${file.name}。点击 '加载本地模型'。`;} 
+                    else { localModelFileSelected.value = false;}
                 }
-
                 async function loadModelFromLocalFileHandler() {
-                    if (!localModelFile.value) {
-                        modelStatus.value = "请先选择一个本地模型文件。";
-                        return;
-                    }
+                    if (!localModelFile.value) { modelStatus.value = "请先选择一个本地模型文件。"; return; }
                     currentLoadSource.value = 'local';
                     const reader = new FileReader();
                     reader.onprogress = (event) => {
-                        if (event.lengthComputable) {
-                            modelLoadingProgress.value = (event.loaded / event.total) * 100;
-                            modelLoadingProgressText.value = `正在读取本地文件... ${modelLoadingProgress.value.toFixed(0)}%`;
-                        } else {
-                            modelLoadingProgress.value = -1;
-                            modelLoadingProgressText.value = `正在读取本地文件...`;
-                        }
+                        if (event.lengthComputable) { modelLoadingProgress.value = (event.loaded / event.total) * 100; modelLoadingProgressText.value = `正在读取本地文件... ${modelLoadingProgress.value.toFixed(0)}%`;} 
+                        else { modelLoadingProgress.value = -1; modelLoadingProgressText.value = `正在读取本地文件...`;}
                     };
-                    reader.onloadstart = () => {
-                        isModelLoading.value = true;
-                        modelLoadingProgressText.value = '开始读取本地文件...';
-                        modelLoadingProgress.value = 0;
-                    };
-                    reader.onload = async (e) => {
-                        await _loadModel(e.target.result, `本地文件 '${localModelFile.value.name}'`);
-                    };
-                    reader.onerror = (e) => {
-                        modelStatus.value = `读取本地文件错误: ${e.target.error}`;
-                        isModelLoading.value = false;
-                    }
+                    reader.onloadstart = () => { isModelLoading.value = true; modelLoadingProgressText.value = '开始读取本地文件...'; modelLoadingProgress.value = 0;};
+                    reader.onload = async (e) => { await _loadModel(e.target.result, `本地文件 '${localModelFile.value.name}'`); };
+                    reader.onerror = (e) => { modelStatus.value = `读取本地文件错误: ${e.target.error}`; isModelLoading.value = false; }
                     reader.readAsArrayBuffer(localModelFile.value);
                 }
-
                 async function downloadModelFromUrl() {
-                    if (!modelUrlInput.value) {
-                        alert("请输入要下载的模型的 URL。");
-                        return;
-                    }
+                    if (!modelUrlInput.value) { alert("请输入要下载的模型的 URL。"); return; }
                     try {
                         const response = await fetch(modelUrlInput.value);
-                        if (!response.ok) {
-                            throw new Error(`下载失败: ${response.status} ${response.statusText}`);
-                        }
+                        if (!response.ok) { throw new Error(`下载失败: ${response.status} ${response.statusText}`);}
                         const blob = await response.blob();
                         const link = document.createElement('a');
                         link.href = URL.createObjectURL(blob);
@@ -378,12 +351,10 @@
                         document.body.removeChild(link);
                         URL.revokeObjectURL(link.href);
                         alert(`模型 '${fileName}' 开始下载。`);
-                    } catch (error) {
-                        alert(`下载模型时出错: ${error.message}`);
-                        console.error("下载模型错误:", error);
-                    }
+                    } catch (error) { alert(`下载模型时出错: ${error.message}`); console.error("下载模型错误:", error); }
                 }
 
+                // --- Image and Canvas Setup (identical to previous version) ---
                 function handleImageUpload(event) {
                     const file = event.target.files[0];
                     if (file) {
@@ -392,9 +363,7 @@
                         reader.onload = (e) => {
                             imageSrc.value = e.target.result;
                             originalImageElement.value = new Image();
-                            originalImageElement.value.onload = () => {
-                                setupCanvas();
-                            };
+                            originalImageElement.value.onload = () => { setupCanvas(); };
                             originalImageElement.value.src = e.target.result;
                         };
                         reader.readAsDataURL(file);
@@ -403,56 +372,38 @@
                         currentSelectionRectStyle.value = { display: 'none' };
                     }
                 }
-
                 function setupCanvas() {
                     if (!imageCanvasRef.value || !originalImageElement.value) return;
-                    
                     const canvas = imageCanvasRef.value;
                     const image = originalImageElement.value;
-                    nextTick(() => { // 确保DOM更新完毕
+                    nextTick(() => { 
                         canvasCtx = canvas.getContext('2d', {willReadFrequently: true});
-
                         const parentElement = canvas.parentElement;
-                        if (!parentElement) return; // 防御性编程
+                        if (!parentElement) return; 
                         const parentWidth = parentElement.clientWidth;
-                        
                         const imageAspectRatio = image.width / image.height;
-                        
-                        let displayWidth = image.width;
-                        let displayHeight = image.height;
-
-                        if (displayWidth > parentWidth) {
-                            displayWidth = parentWidth;
-                            displayHeight = displayWidth / imageAspectRatio;
-                        }
-                        
-                        canvas.width = displayWidth;
-                        canvas.height = displayHeight;
-
-                        canvasScale.x = image.width / canvas.width;
-                        canvasScale.y = image.height / canvas.height;
-                        
+                        let displayWidth = image.width; let displayHeight = image.height;
+                        if (displayWidth > parentWidth) { displayWidth = parentWidth; displayHeight = displayWidth / imageAspectRatio; }
+                        canvas.width = displayWidth; canvas.height = displayHeight;
+                        canvasScale.x = image.width / canvas.width; canvasScale.y = image.height / canvas.height;
                         redrawBaseImageOnCanvas();
                     });
                 }
 
-
-                function startRoiSelection(event) {
+                // --- ROI Selection Core Logic ---
+                function initiateRoiStart(clientX, clientY) {
                     if (!imageCanvasRef.value || !originalImageElement.value || !canvasCtx) return;
-                    
-                    redrawBaseImageOnCanvas(); // 清除旧的蓝色ROI框并重绘图像
-
+                    redrawBaseImageOnCanvas();
                     isRoiFinalized.value = false;
                     isSelectingRoiActive.value = true;
                     
                     const canvasRect = imageCanvasRef.value.getBoundingClientRect();
-                    const x = event.clientX - canvasRect.left;
-                    const y = event.clientY - canvasRect.top;
+                    const x = clientX - canvasRect.left;
+                    const y = clientY - canvasRect.top;
 
                     roiSelectionStartCanvasCoords.value = { x: x, y: y };
-                    currentCanvasSelection.value = { x: x, y: y, width: 0, height: 0 }; // 初始化当前画布选择
+                    currentCanvasSelection.value = { x: x, y: y, width: 0, height: 0 };
 
-                    // 更新实时选择框（红色虚线框）的初始状态
                     currentSelectionRectStyle.value = {
                         display: 'block',
                         left: `${x + (imageCanvasRef.value.offsetLeft || 0)}px`,
@@ -462,28 +413,24 @@
                     };
                 }
 
-                function updateRoiSelection(event) {
+                function processRoiMove(clientX, clientY) {
                     if (!isSelectingRoiActive.value || !roiSelectionStartCanvasCoords.value || !imageCanvasRef.value) return;
 
                     const canvasRect = imageCanvasRef.value.getBoundingClientRect();
-                    let currentX = event.clientX - canvasRect.left;
-                    let currentY = event.clientY - canvasRect.top;
+                    let currentX = clientX - canvasRect.left;
+                    let currentY = clientY - canvasRect.top;
 
-                    // 限制选择范围在画布内
                     currentX = Math.max(0, Math.min(currentX, imageCanvasRef.value.width));
                     currentY = Math.max(0, Math.min(currentY, imageCanvasRef.value.height));
 
                     const start = roiSelectionStartCanvasCoords.value;
-                    
                     const newRectX = Math.min(start.x, currentX);
                     const newRectY = Math.min(start.y, currentY);
                     const newRectWidth = Math.abs(start.x - currentX);
                     const newRectHeight = Math.abs(start.y - currentY);
 
-                    // 更新存储的画布坐标系选择区域
                     currentCanvasSelection.value = { x: newRectX, y: newRectY, width: newRectWidth, height: newRectHeight };
 
-                    // 更新红色虚线实时选择框的样式
                     currentSelectionRectStyle.value = {
                         display: 'block',
                         left: `${newRectX + (imageCanvasRef.value.offsetLeft || 0)}px`,
@@ -493,16 +440,15 @@
                     };
                 }
 
-                function endRoiSelection(event) {
-                    if (!isSelectingRoiActive.value || !canvasCtx) return; // 移除了对 roiSelectionStartCanvasCoords 的检查，因为 currentCanvasSelection 已有值
+                function finalizeRoiSelection() {
+                    if (!isSelectingRoiActive.value || !canvasCtx) return; 
                     
                     isSelectingRoiActive.value = false;
-                    currentSelectionRectStyle.value = { display: 'none' }; // 隐藏红色虚线选择框
+                    currentSelectionRectStyle.value = { display: 'none' };
 
                     const finalSel = currentCanvasSelection.value;
 
-                    if (finalSel.width > 5 && finalSel.height > 5) { // 最小ROI大小检查
-                        // 将画布坐标的ROI转换为原始图片坐标
+                    if (finalSel.width > 5 && finalSel.height > 5) {
                         roiRect.value = {
                             x: Math.round(finalSel.x * canvasScale.x),
                             y: Math.round(finalSel.y * canvasScale.y),
@@ -510,63 +456,76 @@
                             height: Math.round(finalSel.height * canvasScale.y)
                         };
                         isRoiFinalized.value = true;
-
-                        redrawBaseImageOnCanvas(); // 清除画布并重绘基础图像
-
-                        // 在画布上绘制最终确定的ROI（蓝色实线框）
+                        redrawBaseImageOnCanvas();
                         canvasCtx.strokeStyle = 'blue';
                         canvasCtx.lineWidth = 2;
-                        canvasCtx.strokeRect(
-                            finalSel.x, 
-                            finalSel.y, 
-                            finalSel.width, 
-                            finalSel.height
-                        );
-                        
+                        canvasCtx.strokeRect(finalSel.x, finalSel.y, finalSel.width, finalSel.height);
                     } else {
                         isRoiFinalized.value = false;
-                        redrawBaseImageOnCanvas(); // 如果选择太小，则清除画布并重绘基础图像
-                    }
-                }
-                
-                function cancelRoiSelectionIfOutOfBounds(event) {
-                    if (isSelectingRoiActive.value) {
-                        isSelectingRoiActive.value = false;
-                        currentSelectionRectStyle.value = { display: 'none' };
-                        if (!isRoiFinalized.value) { 
-                           redrawBaseImageOnCanvas();
-                        }
+                        redrawBaseImageOnCanvas();
                     }
                 }
 
+                function sharedCancelRoiLogic() {
+                    if (isSelectingRoiActive.value) { // If selection was active, cancel it
+                        isSelectingRoiActive.value = false;
+                         currentSelectionRectStyle.value = { display: 'none' };
+                         if (!isRoiFinalized.value) { // Only redraw if no ROI was finalized yet
+                            redrawBaseImageOnCanvas();
+                         }
+                    } else if (!isRoiFinalized.value) { // If selection was not active and no ROI finalized, ensure clean state
+                         redrawBaseImageOnCanvas();
+                    }
+                    // If an ROI was finalized, it should remain drawn until a new selection starts
+                }
+
+                // --- Mouse Event Handlers ---
+                function startRoiSelectionMouse(event) { initiateRoiStart(event.clientX, event.clientY); }
+                function updateRoiSelectionMouse(event) { if(isSelectingRoiActive.value) processRoiMove(event.clientX, event.clientY); }
+                function endRoiSelectionMouse(event) { finalizeRoiSelection(); }
+                function cancelRoiSelectionMouse(event) { sharedCancelRoiLogic(); }
+
+                // --- Touch Event Handlers ---
+                function startRoiSelectionTouch(event) {
+                    if (event.touches.length === 1) { // Handle single touch for ROI
+                        initiateRoiStart(event.touches[0].clientX, event.touches[0].clientY);
+                    }
+                }
+                function updateRoiSelectionTouch(event) {
+                     if (isSelectingRoiActive.value && event.touches.length === 1) {
+                        processRoiMove(event.touches[0].clientX, event.touches[0].clientY);
+                    }
+                }
+                function endRoiSelectionTouch(event) {
+                    // touchend doesn't have event.touches, use finalizeRoiSelection which relies on currentCanvasSelection
+                    finalizeRoiSelection();
+                }
+                function cancelRoiSelectionTouch(event) {
+                    sharedCancelRoiLogic();
+                }
+
+
+                // --- Preprocessing and Inference (identical to previous version) ---
                 async function preprocessRoiToTensor() {
                     if (!isRoiFinalized.value || !originalImageElement.value || !roiRect.value.width || !roiRect.value.height) {
                         throw new Error("无效的 ROI 用于预处理。");
                     }
                     const { x, y, width, height } = roiRect.value;
-
                     const tempRoiCanvas = document.createElement('canvas');
-                    tempRoiCanvas.width = width;
-                    tempRoiCanvas.height = height;
+                    tempRoiCanvas.width = width; tempRoiCanvas.height = height;
                     const tempRoiCtx = tempRoiCanvas.getContext('2d');
                     tempRoiCtx.drawImage(originalImageElement.value, x, y, width, height, 0, 0, width, height);
-
                     const resizeCanvas = document.createElement('canvas');
-                    resizeCanvas.width = IMG_SIZE;
-                    resizeCanvas.height = IMG_SIZE;
+                    resizeCanvas.width = IMG_SIZE; resizeCanvas.height = IMG_SIZE;
                     const resizeCtx = resizeCanvas.getContext('2d');
                     resizeCtx.drawImage(tempRoiCanvas, 0, 0, width, height, 0, 0, IMG_SIZE, IMG_SIZE);
-
                     const imageData = resizeCtx.getImageData(0, 0, IMG_SIZE, IMG_SIZE);
                     const data = imageData.data;
-
                     const float32Data = new Float32Array(3 * IMG_SIZE * IMG_SIZE);
-                    // NCHW format
                     for (let c = 0; c < 3; ++c) {
                         for (let h = 0; h < IMG_SIZE; ++h) {
                             for (let w = 0; w < IMG_SIZE; ++w) {
-                                const H = IMG_SIZE; // alias for height
-                                const W = IMG_SIZE; // alias for width
+                                const H = IMG_SIZE; const W = IMG_SIZE;
                                 const val = data[(h * W + w) * 4 + c];
                                 float32Data[c * H * W + h * W + w] = (val / 255.0 - NORMALIZATION_MEAN[c]) / NORMALIZATION_STD[c];
                             }
@@ -574,54 +533,27 @@
                     }
                     return new ort.Tensor('float32', float32Data, [1, 3, IMG_SIZE, IMG_SIZE]);
                 }
-
                 async function runInference() {
-                    if (!ortSession.value || !isRoiFinalized.value) {
-                        inferenceError.value = "模型未加载或 ROI 未选择。";
-                        return;
-                    }
-                    isInferring.value = true;
-                    inferenceError.value = '';
-                    inferenceOutput.value = { result: '', confidence: '', probabilities: '' };
-
+                    if (!ortSession.value || !isRoiFinalized.value) { inferenceError.value = "模型未加载或 ROI 未选择。"; return; }
+                    isInferring.value = true; inferenceError.value = ''; inferenceOutput.value = { result: '', confidence: '', probabilities: '' };
                     try {
                         const inputTensor = await preprocessRoiToTensor();
                         const feeds = { [ortSession.value.inputNames[0]]: inputTensor };
                         const results = await ortSession.value.run(feeds);
                         const outputTensor = results[ortSession.value.outputNames[0]];
-                        let probabilitiesData = outputTensor.data; // Float32Array
-
-                        // Apply Softmax if model output is logits
-                        // This assumes outputTensor.data is a flat Float32Array for the batch
+                        let probabilitiesData = outputTensor.data; 
                         const softmax = (arr) => {
-                            const maxLogit = Math.max(...arr);
-                            const exps = arr.map(logit => Math.exp(logit - maxLogit));
-                            const sumExps = exps.reduce((a, b) => a + b, 0);
-                            return exps.map(exp => exp / sumExps);
+                            const maxLogit = Math.max(...arr); const exps = arr.map(logit => Math.exp(logit - maxLogit));
+                            const sumExps = exps.reduce((a, b) => a + b, 0); return exps.map(exp => exp / sumExps);
                         };
-                        
                         const probabilities = softmax(Array.from(probabilitiesData));
-
-
-                        let maxProb = 0;
-                        let predictedIdx = -1;
-                        for (let i = 0; i < probabilities.length; i++) {
-                            if (probabilities[i] > maxProb) {
-                                maxProb = probabilities[i];
-                                predictedIdx = i;
-                            }
-                        }
-                        
+                        let maxProb = 0; let predictedIdx = -1;
+                        for (let i = 0; i < probabilities.length; i++) { if (probabilities[i] > maxProb) { maxProb = probabilities[i]; predictedIdx = i; } }
                         inferenceOutput.value.result = CLASS_NAMES[predictedIdx] || `未知类别 ${predictedIdx}`;
                         inferenceOutput.value.confidence = (maxProb * 100).toFixed(2);
                         inferenceOutput.value.probabilities = probabilities.map(p => p.toFixed(4)).join(', ');
-
-                    } catch (error) {
-                        console.error("推理错误:", error);
-                        inferenceError.value = `推理失败: ${error.message}`;
-                    } finally {
-                        isInferring.value = false;
-                    }
+                    } catch (error) { console.error("推理错误:", error); inferenceError.value = `推理失败: ${error.message}`;
+                    } finally { isInferring.value = false; }
                 }
                 
                 return {
@@ -629,9 +561,9 @@
                     modelSuccessfullyLoaded, modelStatus, currentLoadSource, webGpuError,
                     loadModelFromUrlHandler, handleLocalModelChange, loadModelFromLocalFileHandler, downloadModelFromUrl,
                     imageName, imageSrc, handleImageUpload, imageCanvasRef,
-                    // roiRect, // roiRect (original image coords) is still needed for preprocessing
-                    isSelectingRoiActive, isRoiFinalized, currentSelectionRectStyle, // currentCanvasSelection is internal
-                    startRoiSelection, updateRoiSelection, endRoiSelection, cancelRoiSelectionIfOutOfBounds,
+                    isSelectingRoiActive, isRoiFinalized, currentSelectionRectStyle,
+                    startRoiSelectionMouse, updateRoiSelectionMouse, endRoiSelectionMouse, cancelRoiSelectionMouse,
+                    startRoiSelectionTouch, updateRoiSelectionTouch, endRoiSelectionTouch, cancelRoiSelectionTouch,
                     inferenceOutput, isInferring, inferenceError, runInference,
                 };
             }
